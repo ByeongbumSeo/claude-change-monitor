@@ -1,0 +1,5 @@
+{
+  "name": "claude-change-monitor",
+  "owner": { "name": "ByeongbumSeo" },
+  "plugins": [{ "name": "change-monitor", "source": "./" }]
+}

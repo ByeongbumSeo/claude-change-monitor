@@ -1,0 +1,10 @@
+{
+  "name": "change-monitor",
+  "version": "0.1.0",
+  "description": "Pane that shows what Claude added, changed or deleted since the last Clear",
+  "author": {
+    "name": "ByeongbumSeo"
+  },
+  "repository": "https://github.com/ByeongbumSeo/claude-change-monitor",
+  "types": "./types/index.d.ts"
+}
