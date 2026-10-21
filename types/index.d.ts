@@ -11,6 +11,7 @@ declare module 'claude-code' {
       entries: Record<string, Entry>
       collapsed: Record<string, boolean>
       root: string
+      status: 'on' | 'off'
     }
   }
 }
