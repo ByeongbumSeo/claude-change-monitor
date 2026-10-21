@@ -18,11 +18,10 @@ const status = atom({ plugin: 'change-monitor', key: 'status' } as const, 'on')
 
 type $ = EngineInterface
 
-const NOTICE_MS = 3000
+const NOTICE_MS = 5000
 
 let isGit = false
 let offTimer: ReturnType<$['clock']['after']> | undefined
-let isFinishing = false
 // Pre-Bash reads, reused while a file's mtime and size stay the same.
 const readCache = new Map<string, { mtimeMs: number; size: number; text: string }>()
 
@@ -151,39 +150,36 @@ const COLOR = { A: 'success', M: 'warning', D: 'error' } as const
 const clear = ($: $) =>
   Promise.all([update($, entries, () => ({})), update($, collapsed, () => ({}))])
 
-/** An installed copy runs from the plugin cache; a `--plugin-dir` one from its own folder. */
-const isInstalled = ($: $) => $.plugin.root.includes('/.claude/plugins/cache/')
+const OFF_STATUS = 'change-monitor off · /changes to turn on'
 
-/** Stops tracking at once and shows the off notice, which closes after NOTICE_MS. */
+/** Stops tracking in this session and shows the off notice, which closes after NOTICE_MS. */
 async function turnOff($: $) {
   if ((await read($, status)) === 'off') return
   await Promise.all([update($, status, () => 'off'), clear($)])
-  offTimer = $.clock.after(NOTICE_MS, () => void finishOff($))
+  $.ui.status(OFF_STATUS)
+  offTimer?.cancel()
+  offTimer = $.clock.after(NOTICE_MS, () => void closeNotice($))
 }
 
-/** Closes the notice; an installed copy then disables itself and unloads. */
-async function finishOff($: $) {
-  if (isFinishing) return
-  isFinishing = true
+async function closeNotice($: $) {
   offTimer?.cancel()
   offTimer = undefined
-  await $.ui.close({ id: PANE })
-  if (!isInstalled($)) {
-    isFinishing = false
-    return
-  }
+  if ((await read($, status)) === 'off') await $.ui.close({ id: PANE })
+}
 
-  const run = await $.process
-    .run(['claude', 'plugin', 'disable', $.plugin.name], { timeoutMs: 30_000 })
-    .catch(() => undefined)
-  if (run?.exitCode !== 0) {
-    isFinishing = false
-    $.ui.toast(`change-monitor: could not disable itself; run: claude plugin disable ${$.plugin.name}`)
-    return
-  }
-  await $.command
-    .run({ command: 'reload-plugins' })
-    .catch(() => $.ui.toast('change-monitor: disabled; run /reload-plugins to unload it now.'))
+/** Opens the pane; says why when the surface does not draw it now. */
+async function openPane($: $) {
+  const opened = await $.ui.open({ id: PANE, title: TITLE })
+  return opened.isPlaced ? 'Changes pane opened.' : `Changes pane is open but not drawn: ${opened.reason}`
+}
+
+/** Resumes tracking in this session; the current state is the baseline. */
+async function turnOn($: $) {
+  offTimer?.cancel()
+  offTimer = undefined
+  await Promise.all([update($, status, () => 'on'), clear($)])
+  $.ui.status(undefined)
+  return openPane($)
 }
 
 export const register: Register = on => {
@@ -195,16 +191,15 @@ export const register: Register = on => {
     isGit = top?.exitCode === 0
     await update($, root, () => (isGit ? top!.stdout.trim() : cwd))
 
-    // A (re)load turns tracking back on: an installed copy loads again only once re-enabled.
-    await update($, status, () => 'on')
-    isFinishing = false
-
     await $.command.register({
       name: 'changes',
-      description: 'Open the Changes pane (/changes clear | on | off)',
+      description: 'Open the Changes pane; turns tracking back on when off (/changes clear | on | off)',
       argumentHint: '[clear|on|off]',
     })
-    void $.ui.open({ id: PANE, title: TITLE })
+
+    // On/off is this session's own state, kept across a reload of the mod.
+    if ((await read($, status)) === 'off') $.ui.status(OFF_STATUS)
+    else void $.ui.open({ id: PANE, title: TITLE })
 
     return next(e)
   })
@@ -214,20 +209,17 @@ export const register: Register = on => {
     if (arg === 'off') {
       await turnOff($)
       await $.ui.open({ id: PANE, title: TITLE })
-      return { text: 'Change tracking turned off.' }
+      return { text: 'Change tracking turned off for this session. Turn it back on with /changes' }
     }
-    if (arg === 'on') {
-      await update($, status, () => 'on')
-      await $.ui.open({ id: PANE, title: TITLE })
-      return { text: 'Change tracking turned on: the current state is the baseline.' }
+    if (arg === 'on' || (await read($, status)) === 'off') {
+      const pane = await turnOn($)
+      return { text: `Change tracking turned on: the current state is the baseline. ${pane}` }
     }
-    if ((await read($, status)) !== 'on') return { text: 'Change tracking is off. Turn it on with /changes on' }
     if (arg === 'clear') {
       await clear($)
       return { text: 'Changes cleared: the current state is the new baseline.' }
     }
-    await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Changes pane opened.' }
+    return { text: await openPane($) }
   })
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
@@ -274,19 +266,12 @@ export const register: Register = on => {
     if (state === 'off')
       return (
         <Box flexDirection="column" gap={1}>
-          <Text weight="bold">change-monitor is off.</Text>
-          {isInstalled($) ? (
-            <Text>
-              To turn it back on: <Text color="suggestion">! claude plugin enable {$.plugin.name}</Text>, then{' '}
-              <Text color="suggestion">/reload-plugins</Text>
-            </Text>
-          ) : (
-            <Text>
-              To turn it back on: <Text color="suggestion">/changes on</Text>
-            </Text>
-          )}
+          <Text weight="bold">change-monitor is off for this session.</Text>
+          <Text>
+            To turn it back on: <Text color="suggestion">/changes</Text>
+          </Text>
           <Text dimColor>Closes in {NOTICE_MS / 1000} seconds.</Text>
-          <Button key="close-notice" hotkey="x" onPress={() => void finishOff($)}>
+          <Button key="close-notice" hotkey="x" onPress={() => void closeNotice($)}>
             Close
           </Button>
         </Box>
