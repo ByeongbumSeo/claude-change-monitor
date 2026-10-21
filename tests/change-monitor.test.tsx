@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { merge3, unifiedDiff } from '../hooks/diff'
 
@@ -121,4 +121,63 @@ test('an outside edit between tool calls stays out of the diff', async ($, on) =
   files.set('/repo/a.txt', 'l1\nMINE\nl3\nl4\nl5\nl6\nL7\nl8\n')
   await $.tool.call({ tool: 'Write', file_path: '/repo/a.txt', content: 'l1\nMINE\nl3\nl4\nl5\nl6\nL7\nl8\n' })
   expect(await row()).toContain('mixed')
+})
+
+test('Off stops tracking, shows the notice and closes the pane after 3 seconds', async ($, on) => {
+  const clock = mock.clock(on)
+  const files = new Map([['/repo/a.txt', 'old\n']])
+  let tick = 0
+  const answer = <T,>(path: string, of: (found: string) => T) => {
+    const found = files.get(path)
+    return (found === undefined ? { deny: `ENOENT: ${path}` } : { value: of(found) }) as never
+  }
+  on('fs.stat', ($, e) => answer(e.path, found => ({ kind: 'file', size: found.length, mtimeMs: ++tick, isLink: false })))
+  on('fs.read', ($, e) => answer(e.path, found => found))
+  on('tool.call', ($, e) => {
+    const input = e as unknown as { file_path: string; content: string }
+    files.set(input.file_path, input.content)
+    return { result: {}, text: 'ok' } as never
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const closed: string[] = []
+  on('ui.close', ($, e) => {
+    closed.push(e.id)
+    return { value: undefined } as never
+  })
+
+  await $.tool.call({ tool: 'Write', file_path: '/repo/a.txt', content: 'new\n' })
+  const ui = await $.ui.mount({
+    plugin: 'change-monitor',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'change-monitor',
+    props: { title: 'Changes', isFocused: false, bodyColumns: 80, placement: 'dock' } as never,
+  })
+  expect(await ui.find({ key: 'toggle:/repo/a.txt' })).toBeDefined()
+
+  await ui.press({ key: 'off' })
+  expect(await ui.find({ text: 'change-monitor is off.' })).toBeDefined()
+  expect(await ui.find({ text: '/changes on' })).toBeDefined()
+
+  // Tracking is off: a write now is not recorded.
+  await $.tool.call({ tool: 'Write', file_path: '/repo/a.txt', content: 'newer\n' })
+
+  expect(closed).toEqual([])
+  await clock.advance(3000)
+  expect(closed).toEqual(['change-monitor'])
+  await ui.unmount()
+
+  // Back on: the current state is the baseline.
+  const turnedOn = (await $.command.run({ command: 'changes', args: 'on' } as never)) as { text?: string }
+  expect(turnedOn.text).toContain('turned on')
+  await $.tool.call({ tool: 'Write', file_path: '/repo/b.txt', content: 'hi\n' })
+  const again = await $.ui.mount({
+    plugin: 'change-monitor',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'change-monitor',
+    props: { title: 'Changes', isFocused: false, bodyColumns: 80, placement: 'dock' } as never,
+  })
+  expect(await again.find({ key: 'toggle:/repo/a.txt' })).toBeUndefined()
+  expect(await again.find({ key: 'toggle:/repo/b.txt' })).toBeDefined()
 })

@@ -14,10 +14,15 @@ const MAX_NEW = 200
 const entries = atom({ plugin: 'change-monitor', key: 'entries' } as const, {})
 const collapsed = atom({ plugin: 'change-monitor', key: 'collapsed' } as const, {})
 const root = atom({ plugin: 'change-monitor', key: 'root' } as const, '')
+const status = atom({ plugin: 'change-monitor', key: 'status' } as const, 'on')
 
 type $ = EngineInterface
 
+const NOTICE_MS = 3000
+
 let isGit = false
+let offTimer: ReturnType<$['clock']['after']> | undefined
+let isFinishing = false
 // Pre-Bash reads, reused while a file's mtime and size stay the same.
 const readCache = new Map<string, { mtimeMs: number; size: number; text: string }>()
 
@@ -146,6 +151,41 @@ const COLOR = { A: 'success', M: 'warning', D: 'error' } as const
 const clear = ($: $) =>
   Promise.all([update($, entries, () => ({})), update($, collapsed, () => ({}))])
 
+/** An installed copy runs from the plugin cache; a `--plugin-dir` one from its own folder. */
+const isInstalled = ($: $) => $.plugin.root.includes('/.claude/plugins/cache/')
+
+/** Stops tracking at once and shows the off notice, which closes after NOTICE_MS. */
+async function turnOff($: $) {
+  if ((await read($, status)) === 'off') return
+  await Promise.all([update($, status, () => 'off'), clear($)])
+  offTimer = $.clock.after(NOTICE_MS, () => void finishOff($))
+}
+
+/** Closes the notice; an installed copy then disables itself and unloads. */
+async function finishOff($: $) {
+  if (isFinishing) return
+  isFinishing = true
+  offTimer?.cancel()
+  offTimer = undefined
+  await $.ui.close({ id: PANE })
+  if (!isInstalled($)) {
+    isFinishing = false
+    return
+  }
+
+  const run = await $.process
+    .run(['claude', 'plugin', 'disable', $.plugin.name], { timeoutMs: 30_000 })
+    .catch(() => undefined)
+  if (run?.exitCode !== 0) {
+    isFinishing = false
+    $.ui.toast(`change-monitor: could not disable itself; run: claude plugin disable ${$.plugin.name}`)
+    return
+  }
+  await $.command
+    .run({ command: 'reload-plugins' })
+    .catch(() => $.ui.toast('change-monitor: disabled; run /reload-plugins to unload it now.'))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const cwd = await $.session.cwd()
@@ -155,10 +195,14 @@ export const register: Register = on => {
     isGit = top?.exitCode === 0
     await update($, root, () => (isGit ? top!.stdout.trim() : cwd))
 
+    // A (re)load turns tracking back on: an installed copy loads again only once re-enabled.
+    await update($, status, () => 'on')
+    isFinishing = false
+
     await $.command.register({
       name: 'changes',
-      description: 'Open the Changes pane (/changes clear resets the baseline)',
-      argumentHint: '[clear]',
+      description: 'Open the Changes pane (/changes clear | on | off)',
+      argumentHint: '[clear|on|off]',
     })
     void $.ui.open({ id: PANE, title: TITLE })
 
@@ -166,7 +210,19 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'changes' }, async ($, e) => {
-    if (e.args.trim() === 'clear') {
+    const arg = e.args.trim()
+    if (arg === 'off') {
+      await turnOff($)
+      await $.ui.open({ id: PANE, title: TITLE })
+      return { text: 'Change tracking turned off.' }
+    }
+    if (arg === 'on') {
+      await update($, status, () => 'on')
+      await $.ui.open({ id: PANE, title: TITLE })
+      return { text: 'Change tracking turned on: the current state is the baseline.' }
+    }
+    if ((await read($, status)) !== 'on') return { text: 'Change tracking is off. Turn it on with /changes on' }
+    if (arg === 'clear') {
       await clear($)
       return { text: 'Changes cleared: the current state is the new baseline.' }
     }
@@ -175,6 +231,7 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
+    if ((await read($, status)) !== 'on') return next(e)
     const raw = pathOf(e)
     let path: string | undefined
     try {
@@ -196,6 +253,7 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if ((await read($, status)) !== 'on') return next(e)
     const top = await read($, root)
     const pre = isGit ? await beforeBash($, top).catch(() => undefined) : undefined
 
@@ -206,7 +264,33 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Code } = $.ui.resolve(e)
-    const [map, folded, top] = await Promise.all([read($, entries), read($, collapsed), read($, root)])
+    const [map, folded, top, state] = await Promise.all([
+      read($, entries),
+      read($, collapsed),
+      read($, root),
+      read($, status),
+    ])
+
+    if (state === 'off')
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text weight="bold">change-monitor is off.</Text>
+          {isInstalled($) ? (
+            <Text>
+              To turn it back on: <Text color="suggestion">! claude plugin enable {$.plugin.name}</Text>, then{' '}
+              <Text color="suggestion">/reload-plugins</Text>
+            </Text>
+          ) : (
+            <Text>
+              To turn it back on: <Text color="suggestion">/changes on</Text>
+            </Text>
+          )}
+          <Text dimColor>Closes in {NOTICE_MS / 1000} seconds.</Text>
+          <Button key="close-notice" hotkey="x" onPress={() => void finishOff($)}>
+            Close
+          </Button>
+        </Box>
+      )
 
     const files = Object.entries(map)
       .flatMap(([path, entry]) => {
@@ -227,9 +311,14 @@ export const register: Register = on => {
             {files.length} files <Text color="diffAdded">+{added}</Text>{' '}
             <Text color="diffRemoved">-{removed}</Text>
           </Text>
-          <Button key="clear" hotkey="c" onPress={() => void clear($)}>
-            Clear
-          </Button>
+          <Box flexDirection="row" gap={1}>
+            <Button key="clear" hotkey="c" onPress={() => void clear($)}>
+              Clear
+            </Button>
+            <Button key="off" hotkey="o" onPress={() => void turnOff($)}>
+              Off
+            </Button>
+          </Box>
         </Box>
         {files.length === 0 && <Text dimColor>No changes since the last Clear.</Text>}
         {files.map(f => (

@@ -18,6 +18,7 @@ change-monitor는 **Clear를 누른 시점**을 기준으로 Claude가 추가·�
 ## 사용
 
 - `/changes`: 패널 열기 / `/changes clear` 또는 패널의 **Clear**: 지금 상태를 새 기준으로
+- 패널의 **Off**: 추적을 멈추고 Mod를 끕니다. 다시 켜려면 `! claude plugin enable change-monitor` 후 `/reload-plugins`
 - Claude의 Edit·Write·Bash로 바뀐 파일을 추적합니다. 에디터 등 외부에서 고친 내용은 diff에서 제외합니다.
 
 ---
@@ -30,4 +31,4 @@ A Claude Code pane (mod) that shows **only what the current request changed**.
 
 **Install:** `/plugin install change-monitor --marketplace ByeongbumSeo/claude-change-monitor`
 
-**Use:** `/changes` opens the pane; `/changes clear` or the **Clear** button makes the current state the new baseline. Tracks Claude's Edit, Write and Bash calls; edits made outside Claude are kept out of the diff.
+**Use:** `/changes` opens the pane; `/changes clear` or the **Clear** button makes the current state the new baseline. **Off** stops tracking and disables the mod; turn it back on with `! claude plugin enable change-monitor`, then `/reload-plugins`. Tracks Claude's Edit, Write and Bash calls; edits made outside Claude are kept out of the diff.
