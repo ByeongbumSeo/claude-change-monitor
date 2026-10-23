@@ -123,7 +123,7 @@ test('an outside edit between tool calls stays out of the diff', async ($, on) =
   expect(await row()).toContain('mixed')
 })
 
-test('Off stops tracking, shows the notice and closes the pane after 3 seconds', async ($, on) => {
+test('Off stops tracking, shows the notice and closes the pane after 5 seconds', async ($, on) => {
   const clock = mock.clock(on)
   const files = new Map([['/repo/a.txt', 'old\n']])
   let tick = 0
@@ -139,6 +139,11 @@ test('Off stops tracking, shows the notice and closes the pane after 3 seconds',
     return { result: {}, text: 'ok' } as never
   })
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  let statusLine: string | undefined
+  on('ui.status', ($, e) => {
+    statusLine = (e as unknown as { text?: string }).text
+    return { value: undefined } as never
+  })
   const closed: string[] = []
   on('ui.close', ($, e) => {
     closed.push(e.id)
@@ -156,20 +161,22 @@ test('Off stops tracking, shows the notice and closes the pane after 3 seconds',
   expect(await ui.find({ key: 'toggle:/repo/a.txt' })).toBeDefined()
 
   await ui.press({ key: 'off' })
-  expect(await ui.find({ text: 'change-monitor is off.' })).toBeDefined()
-  expect(await ui.find({ text: '/changes on' })).toBeDefined()
+  expect(await ui.find({ text: 'change-monitor is off for this session.' })).toBeDefined()
+  expect(statusLine).toContain('/changes')
 
   // Tracking is off: a write now is not recorded.
   await $.tool.call({ tool: 'Write', file_path: '/repo/a.txt', content: 'newer\n' })
 
   expect(closed).toEqual([])
-  await clock.advance(3000)
+  await clock.advance(5000)
   expect(closed).toEqual(['change-monitor'])
   await ui.unmount()
 
   // Back on: the current state is the baseline.
-  const turnedOn = (await $.command.run({ command: 'changes', args: 'on' } as never)) as { text?: string }
+  // A bare /changes turns it back on.
+  const turnedOn = (await $.command.run({ command: 'changes', args: '' } as never)) as { text?: string }
   expect(turnedOn.text).toContain('turned on')
+  expect(statusLine).toBeUndefined()
   await $.tool.call({ tool: 'Write', file_path: '/repo/b.txt', content: 'hi\n' })
   const again = await $.ui.mount({
     plugin: 'change-monitor',
